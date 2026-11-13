@@ -31,6 +31,9 @@ window.__ModuleLoader__.load({
         openFile: 'Open file',
         openFolder: 'Open downloads folder',
         openInstall: 'Open install folder',
+        backup: 'Back up current install',
+        backingUp: 'Backing up…',
+        backupFailed: 'Backup failed',
         saveDirLabel: 'Download folder',
         changeDir: 'Change…',
         saveDir: 'Save',
@@ -60,6 +63,9 @@ window.__ModuleLoader__.load({
         openFile: '打开文件',
         openFolder: '打开下载文件夹',
         openInstall: '打开安装目录',
+        backup: '备份当前安装',
+        backingUp: '备份中…',
+        backupFailed: '备份失败',
         saveDirLabel: '下载文件夹',
         changeDir: '更改…',
         saveDir: '保存',
@@ -224,6 +230,16 @@ window.__ModuleLoader__.load({
         }
       };
 
+      const startBackup = async () => {
+        if (jobs.backup?.state === 'downloading') return;
+        setJobs((prev) => ({ ...prev, backup: { tag: 'backup', state: 'downloading', received: 0, total: 0 } }));
+        try {
+          await fetch('/dsh-rollback/backup', { method: 'POST' });
+        } catch {
+          setJobs((prev) => ({ ...prev, backup: { tag: 'backup', state: 'error', error: 'request failed' } }));
+        }
+      };
+
       const rowStyle = {
         display: 'flex',
         alignItems: 'center',
@@ -337,6 +353,21 @@ window.__ModuleLoader__.load({
                   title: state.installDir,
                   onClick: () => openTarget('install=1'),
                 }, t('openInstall'))
+              : null,
+            h('button', {
+              style: buttonStyle,
+              disabled: jobs.backup?.state === 'downloading',
+              onClick: startBackup,
+            }, jobs.backup?.state === 'downloading' ? t('backingUp') : t('backup')),
+            jobs.backup?.state === 'done'
+              ? h('button', {
+                  style: buttonStyle,
+                  onClick: () => openTarget('tag=backup'),
+                }, t('openFile'))
+              : null,
+            jobs.backup?.state === 'error'
+              ? h('span', { style: { color: 'var(--dsw-alias-state-error-primary)', fontSize: '12px', whiteSpace: 'nowrap' } },
+                  `${t('backupFailed')}: ${jobs.backup.error || ''}`)
               : null),
         );
         if (!state.releases.length) {

@@ -229,6 +229,43 @@ export function apply(ctx) {
     }
   }
 
+  /** Archive a directory into a zip using the platform's command-line tool. */
+  function archiveDirectory(src, out) {
+    return new Promise((resolve, reject) => {
+      const child = process.platform === 'win32'
+        // Windows 10+ ships bsdtar as tar.exe; -a picks zip by extension.
+        ? spawn('tar.exe', ['-a', '-c', '-f', out, '-C', src, '.'], { stdio: 'ignore' })
+        : spawn('zip', ['-r', '-q', out, '.'], { cwd: src, stdio: 'ignore' });
+      child.on('error', reject);
+      child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`archive tool exited with ${code}`))));
+    });
+  }
+
+  /** Archive the running install folder into the download folder. */
+  function startBackup() {
+    const tag = 'backup';
+    const job = { tag, url: null, state: 'downloading', received: 0, total: 0, filePath: null, error: null };
+    jobs.set(tag, job);
+    (async () => {
+      try {
+        const installDir = currentInstallDir();
+        if (!installDir) throw new Error('install directory unknown');
+        const version = readCurrentVersion() || 'unknown';
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const downloadDir = currentDownloadDir();
+        await mkdir(downloadDir, { recursive: true });
+        const target = path.join(downloadDir, `dsh-install-backup-v${version}-${stamp}.zip`);
+        await archiveDirectory(installDir, target);
+        job.filePath = target;
+        job.state = 'done';
+      } catch (error) {
+        job.state = 'error';
+        job.error = String(error?.message || error);
+      }
+    })();
+    return job;
+  }
+
   const disposer = ctx.effect(() => {
     const dispose = [
       ctx.webServer.register({
@@ -304,6 +341,18 @@ export function apply(ctx) {
           if (!target) return sendJson(res, 404, { error: 'nothing to open' });
           mkdir(currentDownloadDir(), { recursive: true }).catch(() => {});
           sendJson(res, 200, { opened: revealPath(target, select) });
+        },
+      }),
+      ctx.webServer.register({
+        kind: 'exact',
+        path: '/dsh-rollback/backup',
+        handler: (req, res) => {
+          if (!sameOrigin(req)) return sendJson(res, 403, { error: 'cross-origin' });
+          if (req.method !== 'POST') {
+            res.writeHead(405, { allow: 'POST' });
+            return void res.end();
+          }
+          sendJson(res, 202, startBackup());
         },
       }),
       ctx.webServer.register({
