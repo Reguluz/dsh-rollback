@@ -6,15 +6,20 @@
  * version's source archive into a dedicated folder outside any session
  * workspace:
  *
- *   GET  /dsh-rollback/releases  -> { currentVersion, releases: [...] }
+ *   GET  /dsh-rollback/releases  -> { currentVersion, downloadDir, releases: [...] }
  *   POST /dsh-rollback/download  body { tag, url } -> { tag, state }
  *   GET  /dsh-rollback/status    -> { jobs: [...] }
+ *   GET  /dsh-rollback/open      ?tag=... | ?folder=1 -> { opened }
+ *   POST /dsh-rollback/config    body { downloadDir } -> { downloadDir }
+ *
+ * The download folder defaults to the OS Downloads folder and is persisted in
+ * ~/.dsh-rollback.json when the user changes it.
  */
 
 import { createWriteStream } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { mkdir, rename, rm } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -31,10 +36,37 @@ const ALLOWED_HOSTS = new Set([
 
 export const inject = ['webServer'];
 
+const SETTINGS_FILE = path.join(os.homedir(), '.dsh-rollback.json');
+const DEFAULT_DOWNLOAD_DIR = path.join(os.homedir(), 'Downloads');
+
 export function apply(ctx) {
-  const downloadDir = path.join(os.homedir(), 'dsh-rollback-versions');
   /** @type {Map<string, any>} tag -> job */
   const jobs = new Map();
+
+  function readSettings() {
+    try {
+      const saved = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'));
+      if (saved && typeof saved.downloadDir === 'string' && path.isAbsolute(saved.downloadDir)) {
+        return saved;
+      }
+    } catch {
+      /* missing or malformed settings fall back to defaults */
+    }
+    return {};
+  }
+
+  function writeSettings(settings) {
+    try {
+      writeFileSync(SETTINGS_FILE, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
+    } catch {
+      /* best effort; the effective directory still applies for this run */
+    }
+  }
+
+  /** Effective download directory: user setting when valid, else the OS Downloads folder. */
+  function currentDownloadDir() {
+    return readSettings().downloadDir || DEFAULT_DOWNLOAD_DIR;
+  }
 
   function readCurrentVersion() {
     const candidates = [];
@@ -53,6 +85,14 @@ export function apply(ctx) {
         /* try next anchor */
       }
     }
+    return null;
+  }
+
+  /** Directory of the currently running DSH instance's installation. */
+  function currentInstallDir() {
+    if (process.resourcesPath) return path.dirname(process.resourcesPath); // <app root>/resources -> app root
+    if (process.env.DSH_INSTALL_DIR) return path.resolve(process.env.DSH_INSTALL_DIR, '..', '..');
+    if (process.execPath) return path.dirname(process.execPath);
     return null;
   }
 
@@ -144,6 +184,7 @@ export function apply(ctx) {
     const ext = url.includes('tarball') || url.endsWith('.tar.gz') ? '.tar.gz' : '.zip';
     const base = tag.startsWith('dsh-') ? tag : `dsh-${tag}`;
     const fileName = `${base}${ext}`;
+    const downloadDir = currentDownloadDir();
     const target = path.join(downloadDir, fileName);
     const temp = path.join(downloadDir, `.${fileName}.part`);
 
@@ -197,7 +238,13 @@ export function apply(ctx) {
           if (!sameOrigin(req)) return sendJson(res, 403, { error: 'cross-origin' });
           try {
             const releases = await listReleases();
-            sendJson(res, 200, { currentVersion: readCurrentVersion(), downloadDir, releases });
+            sendJson(res, 200, {
+              currentVersion: readCurrentVersion(),
+              installDir: currentInstallDir(),
+              downloadDir: currentDownloadDir(),
+              defaultDownloadDir: DEFAULT_DOWNLOAD_DIR,
+              releases,
+            });
           } catch (error) {
             sendJson(res, 502, { error: String(error?.message || error) });
           }
@@ -240,7 +287,9 @@ export function apply(ctx) {
           try {
             const query = new URL(req.url, 'http://localhost').searchParams;
             if (query.get('folder') === '1') {
-              target = downloadDir;
+              target = currentDownloadDir();
+            } else if (query.get('install') === '1') {
+              target = currentInstallDir();
             } else {
               const job = jobs.get(query.get('tag') || '');
               // Only reveal files this plugin itself downloaded and finished.
@@ -253,8 +302,33 @@ export function apply(ctx) {
             target = null;
           }
           if (!target) return sendJson(res, 404, { error: 'nothing to open' });
-          mkdir(downloadDir, { recursive: true }).catch(() => {});
+          mkdir(currentDownloadDir(), { recursive: true }).catch(() => {});
           sendJson(res, 200, { opened: revealPath(target, select) });
+        },
+      }),
+      ctx.webServer.register({
+        kind: 'exact',
+        path: '/dsh-rollback/config',
+        handler: async (req, res) => {
+          if (!sameOrigin(req)) return sendJson(res, 403, { error: 'cross-origin' });
+          if (req.method !== 'POST') {
+            res.writeHead(405, { allow: 'POST' });
+            return void res.end();
+          }
+          try {
+            const body = JSON.parse(await readBody(req) || '{}');
+            if (body.downloadDir === undefined) {
+              return sendJson(res, 200, { downloadDir: currentDownloadDir(), defaultDownloadDir: DEFAULT_DOWNLOAD_DIR });
+            }
+            const next = typeof body.downloadDir === 'string' ? body.downloadDir.trim() : '';
+            if (!next || !path.isAbsolute(next)) {
+              return sendJson(res, 400, { error: 'an absolute directory path is required' });
+            }
+            writeSettings({ ...readSettings(), downloadDir: next });
+            sendJson(res, 200, { downloadDir: currentDownloadDir(), defaultDownloadDir: DEFAULT_DOWNLOAD_DIR });
+          } catch (error) {
+            sendJson(res, 400, { error: String(error?.message || error) });
+          }
         },
       }),
     ];

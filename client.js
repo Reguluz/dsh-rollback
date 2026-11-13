@@ -30,6 +30,15 @@ window.__ModuleLoader__.load({
         done: 'Downloaded',
         openFile: 'Open file',
         openFolder: 'Open downloads folder',
+        openInstall: 'Open install folder',
+        saveDirLabel: 'Download folder',
+        changeDir: 'Change…',
+        saveDir: 'Save',
+        cancelDir: 'Cancel',
+        resetDir: 'Reset',
+        dirSaved: 'Saved',
+        dirResetDone: 'Reset to system Downloads folder',
+        dirPickFailed: 'Could not open the directory picker; type a path instead',
         failed: 'Failed',
         retry: 'Retry',
         saveTo: 'Downloads are saved to',
@@ -50,6 +59,15 @@ window.__ModuleLoader__.load({
         done: '已下载',
         openFile: '打开文件',
         openFolder: '打开下载文件夹',
+        openInstall: '打开安装目录',
+        saveDirLabel: '下载文件夹',
+        changeDir: '更改…',
+        saveDir: '保存',
+        cancelDir: '取消',
+        resetDir: '重置',
+        dirSaved: '已保存',
+        dirResetDone: '已重置为系统下载文件夹',
+        dirPickFailed: '无法打开目录选择器，请直接输入路径',
         failed: '失败',
         retry: '重试',
         saveTo: '下载保存位置',
@@ -82,13 +100,68 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function Page(props) {
+    function Page(props, services) {
       const t = (key) => dict[currentLanguage()][key] ?? dict.en[key] ?? key;
+      const uiWorkspace = services?.uiWorkspace;
 
-      const [state, setState] = useState({ phase: 'loading', releases: [], currentVersion: null, downloadDir: '', error: null });
+      const [state, setState] = useState({ phase: 'loading', releases: [], currentVersion: null, installDir: null, downloadDir: '', error: null });
       const [jobs, setJobs] = useState({});
       const [reloadCount, setReloadCount] = useState(0);
+      const [dirNotice, setDirNotice] = useState(null);
+      const [editing, setEditing] = useState(false);
+      const [editDir, setEditDir] = useState('');
       const aliveRef = useRef(true);
+
+      const saveDownloadDir = async (dir, noticeKey) => {
+        try {
+          const response = await fetch('/dsh-rollback/config', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ downloadDir: dir }),
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+          setState((prev) => ({ ...prev, downloadDir: data.downloadDir }));
+          setDirNotice({ key: noticeKey, error: false });
+        } catch (error) {
+          setDirNotice({ key: String(error?.message || error), error: true, raw: true });
+        }
+      };
+
+      const pickDownloadDir = async () => {
+        // Prefer the native directory picker when its service is reachable.
+        try {
+          if (uiWorkspace && typeof uiWorkspace.pickDirectory === 'function') {
+            const picked = await uiWorkspace.pickDirectory();
+            if (picked) {
+              await saveDownloadDir(picked, 'dirSaved');
+              return;
+            }
+            // User cancelled the picker: fall through to the inline editor.
+          }
+        } catch {
+          /* picker unavailable: fall through to the inline editor */
+        }
+        setEditDir(state.downloadDir || '');
+        setEditing(true);
+        setDirNotice(null);
+      };
+
+      const submitEditDir = async () => {
+        setEditing(false);
+        const next = (editDir || '').trim();
+        if (next && next !== state.downloadDir) await saveDownloadDir(next, 'dirSaved');
+      };
+
+      const resetDownloadDir = async () => {
+        try {
+          const response = await fetch('/dsh-rollback/releases', { cache: 'no-store' });
+          const data = await response.json();
+          if (response.ok && data.defaultDownloadDir) await saveDownloadDir(data.defaultDownloadDir, 'dirResetDone');
+        } catch {
+          /* surfaced by saveDownloadDir on its own failures */
+        }
+      };
 
       useEffect(() => {
         aliveRef.current = true;
@@ -98,9 +171,9 @@ window.__ModuleLoader__.load({
             const data = await response.json();
             if (!aliveRef.current) return;
             if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-            setState({ phase: 'ready', releases: data.releases || [], currentVersion: data.currentVersion, downloadDir: data.downloadDir || '', error: null });
+            setState({ phase: 'ready', releases: data.releases || [], currentVersion: data.currentVersion, installDir: data.installDir || null, downloadDir: data.downloadDir || '', error: null });
           } catch (error) {
-            if (aliveRef.current) setState({ phase: 'error', releases: [], currentVersion: null, downloadDir: '', error: String(error?.message || error) });
+            if (aliveRef.current) setState({ phase: 'error', releases: [], currentVersion: null, installDir: null, downloadDir: '', error: String(error?.message || error) });
           }
         };
         load();
@@ -158,6 +231,16 @@ window.__ModuleLoader__.load({
         padding: '10px 12px',
         borderBottom: '1px solid var(--dsw-alias-border-l1)',
       };
+      const smallButtonStyle = {
+        border: '1px solid var(--dsw-alias-border-l2)',
+        background: 'var(--dsw-alias-bg-layer-2)',
+        color: 'var(--dsw-alias-label-primary)',
+        borderRadius: '6px',
+        padding: '2px 8px',
+        fontSize: '12px',
+        cursor: 'pointer',
+        whiteSpace: 'nowrap',
+      };
       const buttonStyle = {
         border: '1px solid var(--dsw-alias-border-l2)',
         background: 'var(--dsw-alias-bg-layer-2)',
@@ -180,8 +263,51 @@ window.__ModuleLoader__.load({
       const children = [
         h('p', { key: 'intro', style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '13px', margin: '0 0 8px' } }, t('intro')),
         state.downloadDir
-          ? h('p', { key: 'dir', style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px', margin: '0 0 12px' } },
-              `${t('saveTo')}: `, h('code', null, state.downloadDir))
+          ? h('div', {
+              key: 'dir',
+              style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', margin: '0 0 12px', fontSize: '12px' },
+            },
+              h('span', { style: { color: 'var(--dsw-alias-label-secondary)', whiteSpace: 'nowrap' } }, `${t('saveDirLabel')}:`),
+              editing
+                ? h('input', {
+                    value: editDir,
+                    onChange: (event) => setEditDir(event.target.value),
+                    onKeyDown: (event) => {
+                      if (event.key === 'Enter') submitEditDir();
+                      if (event.key === 'Escape') setEditing(false);
+                    },
+                    spellCheck: false,
+                    style: {
+                      flex: '1 1 240px',
+                      minWidth: '200px',
+                      border: '1px solid var(--dsw-alias-border-l2)',
+                      background: 'var(--dsw-alias-bg-layer-2)',
+                      color: 'var(--dsw-alias-label-primary)',
+                      borderRadius: '6px',
+                      padding: '3px 8px',
+                      fontSize: '12px',
+                    },
+                  })
+                : h('code', { style: { color: 'var(--dsw-alias-label-primary)' } }, state.downloadDir),
+              editing
+                ? h('button', { style: smallButtonStyle, onClick: submitEditDir }, t('saveDir'))
+                : h('button', {
+                    style: smallButtonStyle,
+                    onClick: pickDownloadDir,
+                  }, t('changeDir')),
+              editing
+                ? h('button', { style: smallButtonStyle, onClick: () => setEditing(false) }, t('cancelDir'))
+                : h('button', {
+                    style: smallButtonStyle,
+                    onClick: resetDownloadDir,
+                  }, t('resetDir')),
+              dirNotice
+                ? h('span', {
+                    style: {
+                      color: dirNotice.error ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-state-success-primary)',
+                    },
+                  }, dirNotice.raw ? dirNotice.key : t(dirNotice.key))
+                : null)
           : null,
         state.phase === 'loading'
           ? h('p', { key: 'loading', style: { color: 'var(--dsw-alias-label-secondary)' } }, t('loading'))
@@ -204,7 +330,14 @@ window.__ModuleLoader__.load({
             h('button', {
               style: buttonStyle,
               onClick: () => openTarget('folder=1'),
-            }, t('openFolder'))),
+            }, t('openFolder')),
+            state.installDir
+              ? h('button', {
+                  style: buttonStyle,
+                  title: state.installDir,
+                  onClick: () => openTarget('install=1'),
+                }, t('openInstall'))
+              : null),
         );
         if (!state.releases.length) {
           children.push(h('p', { key: 'empty', style: { color: 'var(--dsw-alias-label-secondary)' } }, t('empty')));
@@ -255,13 +388,14 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots'],
+      inject: ['slots', 'uiWorkspace'],
       apply(ctx) {
         const label = () => dict[currentLanguage()].title;
         return ctx.effect(() => {
           const disposers = [
             ctx.slots.inject('settings.section', () =>
-              ctx.slots.register({ name: 'settings.section', id: 'dsh-rollback', order: 90, label }, Page)),
+              ctx.slots.register({ name: 'settings.section', id: 'dsh-rollback', order: 90, label }, (props) =>
+                h(Page, props, ctx))),
             ctx.slots.inject('settings.section.icon', () =>
               ctx.slots.register({ name: 'settings.section.icon', id: 'dsh-rollback' }, NavIcon)),
           ];
