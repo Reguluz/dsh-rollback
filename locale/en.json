@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "DSH version rollback",
+    "description": "Adds a Settings page that lists DeepSeek Harness releases from GitHub and downloads an older version's source archive into a dedicated rollback folder, so an accidental upgrade that broke plugins can be undone.",
+    "detail": "docs/DETAIL.md"
+  }
+}

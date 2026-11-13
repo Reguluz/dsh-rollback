@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "DSH 版本回退",
+    "description": "在设置窗口新增「版本回退」页面：每次打开时从 GitHub 读取 DeepSeek Harness 的版本发布列表，一键下载旧版本源码包到独立的回退目录，用于撤销导致插件失效的误升级。",
+    "detail": "docs/DETAIL.md"
+  }
+}
